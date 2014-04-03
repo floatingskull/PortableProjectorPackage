@@ -1,0 +1,281 @@
+/*
+University of Washington
+Classroom Technology & Events
+David Cornwell
+*/
+
+//Compiler Directives
+
+#Default_Volatile
+#Enable_Trace
+#Print_to_Trace
+#CATEGORY "46" "UW/CTE Custom Modules"
+
+#user_library "DateDiffLib"
+
+#define_constant numCarts 100
+
+//IO Variables
+
+analog_output Server_Status;
+
+digital_input Enable_Server, Proj_TurnOn[numCarts], Proj_TurnOff[numCarts], Disconnected_Check[numCarts];
+
+analog_input Restart_Interval;
+
+string_output Asset_Number[numCarts], Error_Text[numCarts], Projector_Type[numCarts], Last_IP[numCarts];
+
+digital_output Power_State[numCarts], System_Power[numCarts];
+
+analog_output Lamp_Hours[numCarts], Filter_Hours[numCarts];
+
+string_output Last_Check_In[numCarts], Duration_Online[numCarts];
+
+//Sockets
+
+tcp_server server[1024];
+
+//Global Variables
+
+string serverIP[16];
+
+integer serverPort;
+
+integer cartIdent, turnOn[numCarts], turnOff[numCarts], timeout[numCarts];                                              
+                                               
+nonvolatile string handshakeDate[numCarts][10], handshakeTime[numCarts][8], lastCheckInDate[numCarts][10], lastCheckInTime[numCarts][8], ipaddress[numCarts][16], durationOnline[numcarts][20];
+
+//Events
+
+SocketConnect server { 
+	print("Transponder Connected");
+}
+
+SocketDisconnect server {
+	print("Disconnected");
+}
+
+SocketReceive server {
+	integer iloc1, iloc2, i, tempDur[4];
+	signed_integer projType, powerState;
+	string info[64], temp[5][16], iptx[32];
+	
+	iloc1 = 0;
+	iloc2 = 0;
+	powerState = -1;
+	iptx = "rxgood!";
+	
+	//Populate our temp string from the received IP string.
+	//info = rx$;
+	info = gather("\x0A", server.socketrxbuf);
+	
+	//This block parses out the info from the string we received from
+	//whichever board is reporting in.  It searches for the delimiters,
+	//which are pipe characters, then pulls the data that is between
+	//the pipe chars, repeating this six times and populating our temp
+	//array.
+	iloc1 = find("|", info);
+
+	for(i = 0 to 5) {	
+		iloc2 = find("|", info, iloc1+1);
+	
+		temp[i] = mid(info, iloc1+1, (iloc2-iloc1)-1);
+		
+		iloc1 = iloc2;
+	}
+	
+	//The first piece of data we received was the unique identifier for
+	//the cart that is reporting in.
+	cartIdent = atoi(temp[0]);
+	
+	//Populate our "last checked in" information.
+	lastCheckInDate[cartIdent] = date(1);
+	lastCheckInTime[cartIdent] = time();
+	Last_Check_In[cartIdent] = lastCheckInDate[cartIdent] + " " + lastCheckInTime[cartIdent];
+	//If we're not doing a handshake, let's see how long we've been online.
+	if(temp[3] != "Handshake") {
+		durationOnline[cartIdent] = GetDateDiff(handshakeDate[cartIdent], lastCheckInDate[cartIdent], handshakeTime[cartIdent], lastCheckInTime[cartIdent]);
+		Duration_Online[cartIdent] = durationOnline[cartIdent];
+		durationOnline[cartIdent] = "." + durationOnline[cartIdent] + ".";
+		
+		//Now we have to parse out the duration information into it's
+		//seperate integer values.
+		iloc1 = find(".", durationOnline[cartIdent]);
+
+		for(i = 0 to 3) {	
+			iloc2 = find(".", durationOnline[cartIdent], iloc1+1);
+		
+			tempDur[i] = atoi(mid(durationOnline[cartIdent], iloc1+1, (iloc2-iloc1)-1));
+		
+			iloc1 = iloc2;
+		}
+		
+		//print("Duration Days: %d Hours: %d Minutes: %d Seconds: %d", tempDur[0], tempDur[1], tempDur[2], tempDur[3]);
+		
+		if(tempDur[1] >= Restart_Interval) {
+			iptx = "restart";
+		}
+
+	}
+		
+	//Make sure that we know that this cart isn't timing out.
+	timeout[cartIdent] = 0;
+	//List this cart's system power as on in RoomView, because it's
+	//reporting in at all and clearly has power.
+	System_Power[cartIdent] = 1;
+	//The second peice of information we received was the cart's asset
+	//number.
+	Asset_Number[cartIdent] = temp[1];
+	
+	//Determine the projector type that's attached to the cart.
+	//This is just for our own information, and isn't important enough to
+	//report to RoomView.  The projector type is the third peice of data
+	//we received.
+	projType = atoi(temp[2]);
+	
+	if(find("-", temp[2]) > 0) { projType = projType * -1; }
+	
+	projType = projType + 1;
+	
+	switch (projType) {
+		case (0): { Projector_Type[cartIdent] = "No Projector"; }
+		case (1): { Projector_Type[cartIdent] = "Old Panasonic"; }
+		case (2): { Projector_Type[cartIdent] = "Hitachi"; }
+    	case (3): { Projector_Type[cartIdent] = "New Panasonic"; }
+    }
+    
+    //The fourth peice of data is one of three things.  If the cart has
+    //just been turned on and this is the first time it's reported in,
+    //the fourth chunk of data is a handshake request.  If we get that
+    //handshake request, we reply appropriately and record the time the
+    //handshake was made.
+	if(temp[3] = "Handshake") {
+		iptx = "handshk";
+		handshakeDate[cartIdent] = date(1);
+		handshakeTime[cartIdent] = time();
+	}
+	//If the cart has been polling a bit, but has run into an error, the
+	//fourth peice of data is the error information.  If not, its' the
+	//power state of the projector.
+	else if(temp[3] != "Error") {
+		Power_State[cartIdent] = atoi(temp[3]);
+		powerState = atoi(temp[3]);
+		Lamp_Hours[cartIdent] = atoi(temp[4]);
+		Filter_Hours[cartIdent] = atoi(temp[5]);
+		Error_Text[cartIdent] = "0:";
+	}
+	//If we're reporting an error, here's where we build the string for
+	//RoomView.
+	else {
+		Error_Text[cartIdent] = "3:" + temp[3] + "(" + temp[1] + ")" + "-" + temp[4];
+	}
+	
+	//If we've been instructed by a RoomView user to turn off or on the
+	//projector, here's where we actually report that back to the cart.
+	//First we check to see if we'd actually be telling the cart to change
+	//power states.
+	
+	if(turnOff[cartIdent] = 1) {
+		iptx = "shutdwn"; 
+		turnOff[cartIdent] = 0;
+	}
+	else if(turnOn[cartIdent] = 1) {
+		iptx = "startup";
+		turnOn[cartIdent] = 0;
+	}
+		
+	//Let's find out the IP address that the transponder is reporting from.
+	socketgetremoteipaddress(server, ipaddress[cartIdent]);
+	Last_IP[cartIdent] = ipaddress[cartIdent];
+	
+	//Actually send the TX string we settled on...
+	socketsend(server, iptx);
+	//... and then clear out the server's RX buffer.
+	clearbuffer(server.SocketRxBuf);
+					
+	//Print the number of the board that's reported in to debugger.
+	print("Board Reporting In: %u", cartIdent);
+	print("At IP Address: %s", ipaddress[cartIdent]);
+	if(temp[3] != "Handshake") { print("Duration: %d Days, %d Hours, %d Minutes, %d Seconds", tempDur[0], tempDur[1], tempDur[2], tempDur[3]); }
+	print("Received: %s", info);
+	print("Transmitted: %s", iptx);
+}
+
+
+//If someone presses the "turn on" button in RoomView, we set up a 
+//variable telling us to turn the appropriate projector on next time
+//that it calls in.
+push Proj_TurnOn {
+	integer i;
+	i = getlastmodifiedarrayindex();
+	turnOn[i] = 1;
+}
+
+//Same for turn on, but with turning off instead.
+push Proj_TurnOff {
+	integer i;
+	i = getlastmodifiedarrayindex();
+	turnOff[i] = 1;
+}
+
+//This is driven by an oscillator in SIMPL.  It first checks every
+//proj cart to see if it's phoned in since the last time this pulse
+//happened, and update the feedback status in RoomView if it hasn't.
+//We then update a variable to track this next time around if the
+//cart did report in.
+push Disconnected_Check {
+	integer i;
+	i = getlastmodifiedarrayindex();
+	if(System_Power[i] = 1) {
+		if(timeout[i] = 1) {
+			Power_State[i] = 0;
+			System_Power[i] = 0;
+		}
+	
+		timeout[i] = 1;
+	}
+}
+
+//This enables the server when the digital join is
+//held high.
+push Enable_Server {
+	signed_integer status;
+	
+	status = socketserverstartlisten(server, serverIP, serverPort);
+	
+	if(status < 0) { print("Error Starting Server"); }
+}
+
+//Releasing the join disables the server.
+release Enable_Server {
+	signed_integer status;
+	
+	status = socketserverstoplisten(server);
+	
+	if(status < 0) { print("Error Starting Server"); }
+}
+
+//Whenever the server's socket status changes, we update
+//the analog output join.
+socketstatus server {
+	signed_integer status;
+	
+	status = socketgetstatus();
+	
+	Server_Status = status;
+}
+
+//Main (Startup Code)
+//Here we initialize our global variables.
+Function Main()
+{
+    waitforinitializationcomplete();
+    
+    serverIP = "0.0.0.0";
+    
+    serverPort = 5555;
+    
+}
+                                       
+                                       
+                                       
