@@ -23,6 +23,8 @@ digital_input Enable_Server, Proj_TurnOn[numCarts], Proj_TurnOff[numCarts], Disc
 
 analog_input Restart_Interval;
 
+analog_output Last_Cart;
+
 string_output Asset_Number[numCarts], Error_Text[numCarts], Projector_Type[numCarts], Last_IP[numCarts];
 
 digital_output Power_State[numCarts], System_Power[numCarts];
@@ -87,6 +89,7 @@ SocketReceive server {
 	//The first piece of data we received was the unique identifier for
 	//the cart that is reporting in.
 	cartIdent = atoi(temp[0]);
+	Last_Cart = cartIdent;
 	
 	//Populate our "last checked in" information.
 	lastCheckInDate[cartIdent] = date(1);
